@@ -13,7 +13,7 @@
 ---
 
 ## Expected Flow
-![flow](.images/flow.png)
+![flow](.images/flow.jpg)
 
 ---
 
