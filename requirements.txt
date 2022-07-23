@@ -1,5 +1,20 @@
-torch>=1.1
-torchvision
+# Base
 numpy
+pandas
+matplotlib
+seaborn
+scikit-learn
 tqdm
+
+# Jupyter Notebook
+jupyter
+Markdown
+
+# Torch
+torch>=1.10
+torchvision>=1.10
 tensorboard>=1.14
+
+# HuggingFace
+transformers>=4
+datasets>=2
