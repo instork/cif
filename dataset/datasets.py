@@ -48,6 +48,7 @@ strptime = lambda datetime: dt.datetime.strptime(datetime, DATETIME_FORMAT) if i
 MAX_LEN = 256
 VALID_SPLIT = 0.1
 
+
 class CoinDataset(BaseDataset):
     """
     ### Base dataset for coin data
@@ -130,7 +131,7 @@ class NewsDataset(CoinDataset):
         old_columns = self.dataset.columns.tolist()
         self.id2label = {idx:label for idx, label in enumerate(self.dataset.target.unique())}
         self.label2id = {label:idx for idx, label in enumerate(self.dataset.target.unique())}
-        self.dataset = self._unlist_news()
+        self.dataset = self._unlist_news(self.dataset)
 
         self.dataset = Dataset.from_pandas(self.dataset)
         self.dataset = self.dataset.train_test_split(valid_split)
@@ -139,10 +140,10 @@ class NewsDataset(CoinDataset):
         self.dataset = self.dataset.remove_columns(old_columns)
         self.dataset.set_format('torch')
 
-    def _unlist_news(self) -> pd.DataFrame:
-        df_unlisted = self.dataset.iloc[[]].copy()
-        for idx in range(len(self.dataset)):
-            df_repeated = pd.concat([self.dataset.iloc[[idx]]]*len(self.dataset.iloc[idx].news))
+    def _unlist_news(self, df: pd.DataFrame) -> pd.DataFrame:
+        df_unlisted = df.iloc[[]].copy()
+        for idx in range(len(df)):
+            df_repeated = pd.concat([df.iloc[[idx]]]*len(df.iloc[idx].news))
             df_repeated.news = df_repeated.iloc[0].news
             df_unlisted = pd.concat([df_unlisted, df_repeated])
         return df_unlisted
