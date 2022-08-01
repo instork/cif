@@ -17,10 +17,11 @@ from base import BaseDataLoader
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.database import Database
-from typing import Union
+from typing import Union, List
 import datetime as dt
 import numpy as np
 import pandas as pd
+import re
 
 ALIAS = {
     'market': lambda x: 'USDT-'+str(x).upper(),
@@ -28,70 +29,106 @@ ALIAS = {
 }
 
 AGG_OPTION = {
-    'open': 'first',
-    'high': 'max',
-    'low': 'min',
-    'close': 'last',
-    'volume': 'sum',
+    'open': lambda x: list(x), # 'first'
+    'high': lambda x: list(x), # 'max'
+    'low': lambda x: list(x), # 'min'
+    'close': lambda x: list(x), # 'last'
+    'volume': lambda x: list(x), # 'sum'
     'market': 'first'}
 
-DATETIME_FORMAT = '%Y/%m/%d'
-DEFAULT_START = '2020/01/01'
+DATETIME_FORMAT = '%Y-%m-%d'
+DEFAULT_START = '2020-01-01'
 DEFAULT_END = dt.datetime.today()
+strptime = lambda datetime: dt.datetime.strptime(datetime, DATETIME_FORMAT) if isinstance(datetime,str) else datetime
 
 
 class CoinDataLoader(BaseDataLoader):
     """
-    Dataloader for Bitcoin and Ethereum prices with news data
+    Dataloader interface for coin data
     """
-    def __init__(self, data_dir, batch_size, shuffle=True, validation_split=0.0, num_workers=1, training=True,
-                start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END):
-        self.data_dir = data_dir
-        self.set_datetime(start, end)
-        self.dataset = self.load_dataframe()
-        super().__init__(self.dataset, batch_size, shuffle, validation_split, num_workers)
 
     def set_datetime(self, start: Union[dt.datetime,str], end: Union[dt.datetime,str]):
         """
-        Set start/end date with format like 2020/01/01 or using datetime object.
+        Set start/end date with format like 2020-01-01 or using datetime object.
         """
-        self.start = dt.datetime.strptime(start, DATETIME_FORMAT) if isinstance(start,str) else start
-        self.end = dt.datetime.strptime(end, DATETIME_FORMAT) if isinstance(end,str) else end
+        self.start = strptime(start)
+        self.end = strptime(end)
 
-    def load_dataframe(self) -> pd.DataFrame:
-        df = pd.read_csv(self.data_dir)
-        df['news'] = df['news'].apply(lambda x: eval(x))
+    def load_dataframe(self, data_dir: str, columns: List[str]) -> pd.DataFrame:
+        """
+        Load .csv file from data_dir with selected columns.
+        Value types in dataframe are expected only list or datetime.
+        """
+        df = pd.read_csv(data_dir)[columns]
+        for column in columns:
+            df[column] = df[column].apply(lambda x: strptime(x) if re.match('^\d+-\d+-\d+$',x) else eval(x))
         return df
 
+    def label_dataframe(self, df: pd.DataFrame, problem_type: str, drop_price=True) -> pd.DataFrame:
+        """
+        Label by one day later fluctuation percentage.
+        [multi_label_classification]: -4%, -2%, 2%, 4%
+        [single_label_classification]: Up, Down
+        """
+        open_price = df['open'].apply(lambda x: x[0])
+        close_price = df['close'].apply(lambda x: x[-1])
+        df['target'] = (((close_price - open_price) / open_price) * 100.).shift(-1)
+        df.dropna(how='any', inplace=True)
+        df['target'] = self._classify_labels(df['target'], problem_type)
+        df = df.drop(['open','close'], axis=1) if drop_price else df
+        return df
 
-class NewsDataLoader(BaseDataLoader):
+    def _classify_labels(self, target: pd.Series, problem_type) -> pd.Series:
+        if problem_type == 'multi_label_classification':
+            return np.where(target <= -4., '-4%',
+                            np.where(target < 0., '-2%',
+                            np.where(target < 4., '+2%', '+4%')))
+        elif problem_type == 'single_label_classification':
+            return np.where(target < 0., 'Down', 'Up')
+        else:
+            raise Exception('Unexpected problem type entered!')
+
+
+class NewsDataLoader(CoinDataLoader):
     """
-    Dataloader for Bitcoin and Ethereum prices with news data
+    Dataloader for Bitcoin and Ethereum news data
+    [multi_label_classification]: -4%, -2%, 2%, 4%
+    [single_label_classification]: Up, Down
     """
     def __init__(self, data_dir, batch_size, shuffle=True, validation_split=0.0, num_workers=1, training=True,
-                start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END):
-        self.data_dir = data_dir
+                start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END,
+                problem_type='multi_label_classification'):
         self.set_datetime(start, end)
-        self.dataset = self.load_dataframe()
+        self.dataset = self.load_dataframe(data_dir, ['etz_time','news','open','close'])
+        self.dataset = self.label_dataframe(self.dataset, problem_type)
         super().__init__(self.dataset, batch_size, shuffle, validation_split, num_workers)
 
-    def set_datetime(self, start: Union[dt.datetime,str], end: Union[dt.datetime,str]):
-        """
-        Set start/end date with format like 2020/01/01 or using datetime object.
-        """
-        self.start = dt.datetime.strptime(start, DATETIME_FORMAT) if isinstance(start,str) else start
-        self.end = dt.datetime.strptime(end, DATETIME_FORMAT) if isinstance(end,str) else end
+    def preprocess(self):
+        pass
 
-    def load_dataframe(self) -> pd.DataFrame:
-        df = pd.read_csv(self.data_dir)
-        df['news'] = df['news'].apply(lambda x: eval(x))
-        return df
+
+class OhlcDataLoader(CoinDataLoader):
+    """
+    Dataloader for Bitcoin and Ethereum price data
+    [multi_label_classification]: -4%, -2%, 2%, 4%
+    [single_label_classification]: Up, Down
+    """
+    def __init__(self, data_dir, batch_size, shuffle=True, validation_split=0.0, num_workers=1, training=True,
+                start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END,
+                problem_type='multi_label_classification'):
+        self.set_datetime(start, end)
+        self.dataset = self.load_dataframe(data_dir, ['etz_time','open','high','low','close','volume'])
+        self.dataset = self.label_dataframe(self.dataset, problem_type, drop_price=False)
+        super().__init__(self.dataset, batch_size, shuffle, validation_split, num_workers)
+
+    def preprocess(self):
+        pass
 
 
 class MongoDataLoader(BaseDataLoader):
     """
     MongoDB Dataloader for coin data.
-    You can limit start/end date with format like 2020/01/01 or using datetime object.
+    You can limit start/end date with format like 2020-01-01 or using datetime object.
     """
     def __init__(self, batch_size=64, shuffle=True, validation_split=0.0, num_workers=1, db_name='test_db', target='btc',
                 start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END):
@@ -101,14 +138,14 @@ class MongoDataLoader(BaseDataLoader):
 
     def set_datetime(self, start: Union[dt.datetime,str], end: Union[dt.datetime,str]):
         """
-        Set start/end date with format like 2020/01/01 or using datetime object.
+        Set start/end date with format like 2020-01-01 or using datetime object.
         """
         self.start = dt.datetime.strptime(start, DATETIME_FORMAT) if isinstance(start,str) else start
         self.end = dt.datetime.strptime(end, DATETIME_FORMAT) if isinstance(end,str) else end
 
     def load_mongo_data(self, db_name: str, target: str) -> pd.DataFrame:
         """
-        Load coin dataframe from MongoDB, requires data/.env file.
+        Load coin dataframe from remote MongoDB, requires 'data/.env' file.
         """
         client = MongoClient(self._load_mongo_url())
         db = client[db_name]
