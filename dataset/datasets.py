@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+from multiprocessing.sharedctypes import Value
 import os
 import platform
 import sys
@@ -11,15 +12,16 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 if platform.system() != 'Windows':
     ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
+DATA_DIR = os.path.join(ROOT, 'data')
 
-from datasets import load_dataset
-from datasets.arrow_dataset import Dataset
+from datasets import Dataset
 from torch.utils.data import Dataset as BaseDataset
 from transformers import AutoTokenizer
+from transformers.tokenization_utils_base import BatchEncoding
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.database import Database
-from typing import Union, List
+from typing import Callable, Union, Dict, List
 import datetime as dt
 import numpy as np
 import pandas as pd
@@ -43,16 +45,19 @@ DEFAULT_START = '2020-01-01'
 DEFAULT_END = dt.datetime.today()
 strptime = lambda datetime: dt.datetime.strptime(datetime, DATETIME_FORMAT) if isinstance(datetime,str) else datetime
 
+MAX_LEN = 256
+VALID_SPLIT = 0.1
 
 class CoinDataset(BaseDataset):
     """
     ### Base dataset for coin data
     """
-    def __init__(self, data_dir: str, columns: List[str], problem_type='multi_label_classification',
+    def __init__(self, data: str, columns: List[str], problem_type='multi_label_classification',
                 start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END):
         self.set_datetime(start, end)
-        self.dataset = self.load_dataframe(data_dir, columns)
-        self.dataset = self.label_dataframe(self.dataset, problem_type)
+        self.problem_type = problem_type
+        self.dataset = self.load_dataframe(data, columns)
+        self.dataset = self.label_dataframe(self.dataset)
 
     def set_datetime(self, start: Union[dt.datetime,str], end: Union[dt.datetime,str]):
         """
@@ -61,17 +66,17 @@ class CoinDataset(BaseDataset):
         self.start = strptime(start)
         self.end = strptime(end)
 
-    def load_dataframe(self, data_dir: str, columns: List[str]) -> pd.DataFrame:
+    def load_dataframe(self, data: str, columns: List[str]) -> pd.DataFrame:
         """
-        #### Load .csv file from data_dir with selected columns.
+        #### Load .csv file from data directory with selected columns.
         Value types in dataframe are expected only list or datetime.
         """
-        df = pd.read_csv(data_dir)[columns]
+        df = pd.read_csv(os.path.join(DATA_DIR, data))[columns]
         for column in columns:
             df[column] = df[column].apply(lambda x: strptime(x) if re.match('^\d+-\d+-\d+$',x) else eval(x))
         return df
 
-    def label_dataframe(self, df: pd.DataFrame, problem_type: str, drop_price=True) -> pd.DataFrame:
+    def label_dataframe(self, df: pd.DataFrame, drop_price=True) -> pd.DataFrame:
         """
         ### Label by one day later fluctuation percentage.
         [multi_label_classification]: -4%, -2%, 2%, 4%
@@ -81,19 +86,22 @@ class CoinDataset(BaseDataset):
         close_price = df['close'].apply(lambda x: x[-1])
         df['target'] = (((close_price - open_price) / open_price) * 100.).shift(-1)
         df.dropna(how='any', inplace=True)
-        df['target'] = self._classify_labels(df['target'], problem_type)
+        df['target'] = self._classify_labels(df['target'])
         df = df.drop(['open','close'], axis=1) if drop_price else df
         return df
 
-    def _classify_labels(self, target: pd.Series, problem_type) -> pd.Series:
-        if problem_type == 'multi_label_classification':
+    def preprocess(self):
+        raise NotImplementedError
+
+    def _classify_labels(self, target: pd.Series) -> pd.Series:
+        if self.problem_type == 'multi_label_classification':
             return np.where(target <= -4., '-4%',
                             np.where(target < 0., '-2%',
                             np.where(target < 4., '+2%', '+4%')))
-        elif problem_type == 'single_label_classification':
+        elif self.problem_type == 'single_label_classification':
             return np.where(target < 0., 'Down', 'Up')
         else:
-            raise Exception('Unexpected problem type entered!')
+            raise ValueError('Unexpected problem type entered!')
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -108,14 +116,46 @@ class NewsDataset(CoinDataset):
     [multi_label_classification]: -4%, -2%, 2%, 4%
     [single_label_classification]: Up, Down
     """
-    def __init__(self, data_dir, problem_type='multi_label_classification',
+    def __init__(self, data='btc.csv', problem_type='multi_label_classification',
                 start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END):
         news_columns = ['etz_time','news','open','close']
+        self.problem_type = problem_type
         self.dataset = pd.DataFrame()
-        super().__init__(data_dir, news_columns, problem_type, start, end)
+        super().__init__(data, news_columns, problem_type, start, end)
 
-    def preprocess(self):
-        pass
+    def preprocess(self, model_path: str, max_len=MAX_LEN, valid_split=VALID_SPLIT, labeled=True):
+        """
+        #### Preprocess news data with tokenization and label encoding.
+        """
+        old_columns = self.dataset.columns.tolist()
+        self.id2label = {idx:label for idx, label in enumerate(self.dataset.target.unique())}
+        self.label2id = {label:idx for idx, label in enumerate(self.dataset.target.unique())}
+        self.dataset = self._unlist_news()
+
+        self.dataset = Dataset.from_pandas(self.dataset)
+        self.dataset = self.dataset.train_test_split(valid_split)
+        self.dataset = self.dataset.map(self._tokenize(model_path, max_len), batched=True)
+        self.dataset = self.dataset.map(self._label_encoding) if labeled else self.dataset
+        self.dataset = self.dataset.remove_columns(old_columns)
+        self.dataset.set_format('torch')
+
+    def _unlist_news(self) -> pd.DataFrame:
+        df_unlisted = self.dataset.iloc[[]].copy()
+        for idx in range(len(self.dataset)):
+            df_repeated = pd.concat([self.dataset.iloc[[idx]]]*len(self.dataset.iloc[idx].news))
+            df_repeated.news = df_repeated.iloc[0].news
+            df_unlisted = pd.concat([df_unlisted, df_repeated])
+        return df_unlisted
+
+    def _tokenize(self, model_path: str, max_len: int) -> Callable[[Dataset],BatchEncoding]:
+        tokenizer = AutoTokenizer.from_pretrained(model_path, problem_type=self.problem_type)
+        return lambda examples: tokenizer(examples['news'], max_length=max_len, padding='max_length', truncation=True)
+
+    def _label_encoding(self, examples: Dataset) -> Dict[str,np.ndarray]:
+        if self.problem_type == 'multi_label_classification':
+            return {'labels':np.eye(len(self.label2id))[self.label2id[examples['target']]]}
+        elif self.problem_type == 'single_label_classification':
+            return {'labels':self.label2id[examples['target']]}
 
 
 class OhlcDataset(CoinDataset):
@@ -124,11 +164,12 @@ class OhlcDataset(CoinDataset):
     [multi_label_classification]: -4%, -2%, 2%, 4%
     [single_label_classification]: Up, Down
     """
-    def __init__(self, data_dir, problem_type='multi_label_classification',
+    def __init__(self, data='btc.csv', problem_type='multi_label_classification',
                 start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END):
         ohlc_columns = ['etz_time','open','high','low','close','volume']
+        self.problem_type = problem_type
         self.dataset = pd.DataFrame()
-        super().__init__(data_dir, ohlc_columns, problem_type, start, end)
+        super().__init__(data, ohlc_columns, problem_type, start, end)
 
     def preprocess(self):
         pass
@@ -153,7 +194,7 @@ class MongoDataset(BaseDataset):
 
     def load_mongo_data(self, db_name: str, target: str) -> pd.DataFrame:
         """
-        #### Load coin dataframe from remote MongoDB, requires 'data/.env' file.
+        #### Load coin dataframe from remote MongoDB, requires 'data/mongo_env'.
         """
         client = MongoClient(self._load_mongo_url())
         db = client[db_name]
@@ -169,7 +210,7 @@ class MongoDataset(BaseDataset):
         self.dataset.to_csv(path, index=include_index)
 
     def _load_mongo_url(self) -> str:
-        load_dotenv(os.path.join(ROOT, 'data/.env'))
+        load_dotenv(os.path.join(DATA_DIR, 'mongo_env'))
         user = os.getenv("MONGODB_USER")
         pwd = os.getenv("MONGODB_PWD")
         host = os.getenv("MONGODB_HOST")
