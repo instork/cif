@@ -14,7 +14,8 @@ if platform.system() != 'Windows':
 
 from datasets import load_dataset
 from datasets.arrow_dataset import Dataset
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset as BaseDataset
+from transformers import AutoTokenizer
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.database import Database
@@ -43,7 +44,7 @@ DEFAULT_END = dt.datetime.today()
 strptime = lambda datetime: dt.datetime.strptime(datetime, DATETIME_FORMAT) if isinstance(datetime,str) else datetime
 
 
-class CoinDataset(Dataset):
+class CoinDataset(BaseDataset):
     """
     ### Base dataset for coin data
     """
@@ -133,7 +134,7 @@ class OhlcDataset(CoinDataset):
         pass
 
 
-class MongoDataset(Dataset):
+class MongoDataset(BaseDataset):
     """
     ### MongoDB Dataset for coin data
     You can limit start/end date with format like 2020-01-01 or using datetime object.
