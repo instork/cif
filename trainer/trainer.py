@@ -1,4 +1,3 @@
-import os
 import numpy as np
 import torch
 from torchvision.utils import make_grid
@@ -11,31 +10,14 @@ from transformers.trainer_utils import EvalPrediction
 from typing import Callable, Dict, List
 
 
-class CoinTrainingArguments(TrainingArguments):
-    def __init__(self, **kwargs):
-        required_dirs = self.make_dirs(kwargs['model_name'])
-        kwargs['output_dir'] = required_dirs['model_dir']
-        kwargs['logging_dir'] = required_dirs['logging_dir']
-        super().__init__(**kwargs)
-
-    def make_dirs(self, name: str) -> Dict[str,str]:
-        required_dirs = {
-            'root':'./saved','model_root':'./saved/models','model_dir':f'./saved/models/{name}',
-            'logging_root':'./saved/logger','logging_dir':f'./saved/logger/{name}'}
-        for dir in required_dirs.values():
-            if not os.path.isdir(dir):
-                os.mkdir(dir)
-        return required_dirs
-
-
 class CoinTrainer(Trainer):
-    def __init__(self, args: TrainingArguments, dataset: Dataset, model: ElectraForSequenceClassification,
-                compute_metrics: Callable[[EvalPrediction],Dict], callbacks: List[any]):
+    def __init__(self, train_dataset: Dataset, eval_dataset: Dataset, model: ElectraForSequenceClassification,
+                compute_metrics: Callable[[EvalPrediction],Dict], callbacks: List[any], **kwargs):
         super().__init__(
             model=model,
-            args=args,
-            train_dataset=dataset['train'],
-            eval_dataset=dataset['test'],
+            args=TrainingArguments(**kwargs),
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
             compute_metrics=compute_metrics,
             callbacks=callbacks)
 
