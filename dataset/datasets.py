@@ -1,6 +1,3 @@
-import argparse
-import contextlib
-from multiprocessing.sharedctypes import Value
 import os
 import platform
 import sys
@@ -54,18 +51,20 @@ class CoinDataset(BaseDataset):
     ### Base dataset for coin data
     """
     def __init__(self, data: str, columns: List[str], problem_type='multi_label_classification',
-                start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END):
+                start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END, **kwargs):
         self.set_datetime(start, end)
         self.problem_type = problem_type
         self.dataset = self.load_dataframe(data, columns)
         self.dataset = self.label_dataframe(self.dataset)
+        self.id2label = {idx:label for idx, label in enumerate(self.dataset.target.unique())}
+        self.label2id = {label:idx for idx, label in enumerate(self.dataset.target.unique())}
 
     def set_datetime(self, start: Union[dt.datetime,str], end: Union[dt.datetime,str]):
         """
         #### Set start/end date with format like 2020-01-01 or using datetime object.
         """
-        self.start = strptime(start)
-        self.end = strptime(end)
+        self.start = strptime(start) if start else strptime(DEFAULT_START)
+        self.end = strptime(end) if end else strptime(DEFAULT_END)
 
     def load_dataframe(self, data: str, columns: List[str]) -> pd.DataFrame:
         """
@@ -75,7 +74,7 @@ class CoinDataset(BaseDataset):
         df = pd.read_csv(os.path.join(DATA_DIR, data))[columns]
         for column in columns:
             df[column] = df[column].apply(lambda x: strptime(x) if re.match('^\d+-\d+-\d+$',x) else eval(x))
-        return df
+        return df[(df['etz_time']>=self.start)&(df['etz_time']<=self.end)]
 
     def label_dataframe(self, df: pd.DataFrame, drop_price=True) -> pd.DataFrame:
         """
@@ -91,7 +90,7 @@ class CoinDataset(BaseDataset):
         df = df.drop(['open','close'], axis=1) if drop_price else df
         return df
 
-    def preprocess(self):
+    def preprocess(self, df: pd.DataFrame, **kwargs) -> Dataset:
         raise NotImplementedError
 
     def _classify_labels(self, target: pd.Series) -> pd.Series:
@@ -108,7 +107,7 @@ class CoinDataset(BaseDataset):
         return len(self.dataset)
 
     def __getitem__(self, index: int) -> pd.Series:
-            return self.dataset.iloc[index]
+        return self.dataset.iloc[index]
 
 
 class NewsDataset(CoinDataset):
@@ -117,28 +116,29 @@ class NewsDataset(CoinDataset):
     [multi_label_classification]: -4%, -2%, 2%, 4%
     [single_label_classification]: Up, Down
     """
-    def __init__(self, data='btc.csv', problem_type='multi_label_classification',
-                start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END):
+    def __init__(self, data='btc.csv', problem_type='multi_label_classification', preprocessed=False,
+                start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END, **kwargs):
         news_columns = ['etz_time','news','open','close']
         self.problem_type = problem_type
         self.dataset = pd.DataFrame()
-        super().__init__(data, news_columns, problem_type, start, end)
+        super().__init__(data, news_columns, problem_type, start, end, **kwargs)
+        self.dataset = self.preprocess(self.dataset, **kwargs) if preprocessed else self.dataset
 
-    def preprocess(self, model_path: str, max_len=MAX_LEN, valid_split=VALID_SPLIT, labeled=True):
+    def preprocess(self, df: pd.DataFrame, model_path: str, max_len=MAX_LEN,
+                    valid_split=VALID_SPLIT, labeled=True, **kwargs) -> Dataset:
         """
         #### Preprocess news data with tokenization and label encoding.
         """
-        old_columns = self.dataset.columns.tolist()
-        self.id2label = {idx:label for idx, label in enumerate(self.dataset.target.unique())}
-        self.label2id = {label:idx for idx, label in enumerate(self.dataset.target.unique())}
-        self.dataset = self._unlist_news(self.dataset)
+        old_columns = df.columns.tolist()
+        df = self._unlist_news(df)
 
-        self.dataset = Dataset.from_pandas(self.dataset)
-        self.dataset = self.dataset.train_test_split(valid_split)
-        self.dataset = self.dataset.map(self._tokenize(model_path, max_len), batched=True)
-        self.dataset = self.dataset.map(self._label_encoding) if labeled else self.dataset
-        self.dataset = self.dataset.remove_columns(old_columns)
-        self.dataset.set_format('torch')
+        dataset = Dataset.from_pandas(df)
+        dataset = dataset.train_test_split(valid_split)
+        dataset = dataset.map(self._tokenize(model_path, max_len), batched=True)
+        dataset = dataset.map(self._label_encoding) if labeled else dataset
+        dataset = dataset.remove_columns(old_columns)
+        dataset.set_format('torch')
+        return dataset
 
     def _unlist_news(self, df: pd.DataFrame) -> pd.DataFrame:
         df_unlisted = df.iloc[[]].copy()
@@ -165,12 +165,12 @@ class OhlcDataset(CoinDataset):
     [multi_label_classification]: -4%, -2%, 2%, 4%
     [single_label_classification]: Up, Down
     """
-    def __init__(self, data='btc.csv', problem_type='multi_label_classification',
-                start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END):
+    def __init__(self, data='btc.csv', problem_type='multi_label_classification', preprocessed=False,
+                start: Union[dt.datetime,str]=DEFAULT_START, end: Union[dt.datetime,str]=DEFAULT_END, **kwargs):
         ohlc_columns = ['etz_time','open','high','low','close','volume']
         self.problem_type = problem_type
         self.dataset = pd.DataFrame()
-        super().__init__(data, ohlc_columns, problem_type, start, end)
+        super().__init__(data, ohlc_columns, problem_type, start, end, **kwargs)
 
     def preprocess(self):
         pass
